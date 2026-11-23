@@ -19,7 +19,10 @@ export default defineConfig({
       sidebar: [
         {
           label: "Start here",
-          items: [{ label: "Introduction", slug: "index" }],
+          items: [
+            { label: "Overview", slug: "overview" },
+            { label: "What is built", slug: "status" },
+          ],
         },
       ],
     }),

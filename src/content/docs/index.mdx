@@ -1,6 +1,36 @@
 ---
 title: Oktant Docs
 description: Documentation for Oktant, an engineering platform for the complete software lifecycle.
+template: splash
+hero:
+  tagline: Build. Deploy. Observe. How the Oktant platform fits together, how to run it locally, and what is built so far.
+  image:
+    light: ../../assets/oktant-mark.png
+    dark: ../../assets/oktant-mark-white.png
+    alt: Oktant
+  actions:
+    - text: Read the overview
+      link: /overview/
+      icon: right-arrow
+    - text: GitHub
+      link: https://github.com/oktanthq
+      icon: external
+      variant: minimal
 ---
 
-Documentation for Oktant is being written. Pages will land here as each part of the platform is documented.
+import { Card, CardGrid } from "@astrojs/starlight/components";
+
+<CardGrid>
+  <Card title="Build" icon="seti:git">
+    Repositories, pull request reviews, and code analysis. Codehound scans connected repositories and writes findings back to the platform.
+  </Card>
+  <Card title="Deploy" icon="rocket">
+    Infrastructure, environments, releases, and production. CI Forge is the Go library we use to talk to CI provider APIs.
+  </Card>
+  <Card title="Observe" icon="information">
+    Logs, metrics, traces, alerts, and system health. The project pages exist; live data sources are still planned.
+  </Card>
+  <Card title="Status" icon="list-format">
+    Some parts of Oktant are working end to end and some are still planned. See [what is built](/status/) before relying on a feature.
+  </Card>
+</CardGrid>
