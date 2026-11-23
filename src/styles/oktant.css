@@ -1,0 +1,35 @@
+/* Oktant palette, matched to the frontend design tokens. */
+:root {
+  --sl-font: "Manrope", ui-sans-serif, system-ui, sans-serif;
+  --sl-color-accent-low: #3a1d12;
+  --sl-color-accent: #e4572e;
+  --sl-color-accent-high: #f7c8b6;
+  --sl-color-white: #f5f1e8;
+  --sl-color-gray-1: #eee9de;
+  --sl-color-gray-2: #d5d0c6;
+  --sl-color-gray-3: #a8a297;
+  --sl-color-gray-4: #6b665d;
+  --sl-color-gray-5: #3a3833;
+  --sl-color-gray-6: #242320;
+  --sl-color-black: #171717;
+}
+
+:root[data-theme="light"] {
+  --sl-color-accent-low: #f9ddd2;
+  --sl-color-accent: #c2431d;
+  --sl-color-accent-high: #5a200e;
+  --sl-color-white: #171717;
+  --sl-color-gray-1: #242320;
+  --sl-color-gray-2: #3a3833;
+  --sl-color-gray-3: #6b665d;
+  --sl-color-gray-4: #a8a297;
+  --sl-color-gray-5: #d5d0c6;
+  --sl-color-gray-6: #eee9de;
+  --sl-color-gray-7: #faf8f3;
+  --sl-color-black: #f5f1e8;
+}
+
+.site-title img {
+  height: 1.75rem;
+  width: auto;
+}
