@@ -30,6 +30,10 @@ export default defineConfig({
           items: [{ autogenerate: { directory: "getting-started" } }],
         },
         {
+          label: "Components",
+          items: [{ autogenerate: { directory: "components" } }],
+        },
+        {
           label: "Reference",
           items: [{ autogenerate: { directory: "reference" } }],
         },

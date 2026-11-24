@@ -1,0 +1,163 @@
+---
+title: Codehound
+description: How the Codehound code intelligence engine and its analysis worker are put together.
+sidebar:
+  order: 1
+---
+
+Source: [oktanthq/codehound](https://github.com/oktanthq/codehound) · design notes in [`docs/ARCHITECTURE.md`](https://github.com/oktanthq/codehound/blob/main/docs/ARCHITECTURE.md)
+
+Codehound is the code intelligence engine behind the Build pillar. It combines retrieval, static code analysis, and a Code Intelligence Model (CIM) to build a persistent, queryable understanding of a repository: ASTs, dependencies, call graphs, component relationships, data flows, architecture layers, and business rules. That model is used for pull request reviews, code-change suggestions, and vulnerability assessment, and it is exposed to editors and coding tools over MCP.
+
+## Stack
+
+TypeScript on Node.js 20+. The GitHub App, REST, and webhook surface maps directly onto Node, MCP is JSON-RPC over stdio/HTTP and fits a typed Node service, and one runtime keeps CI, packaging, and local setup simple. Analysis and retrieval sit behind module boundaries, so a different parser or model stack could be added later without changing callers.
+
+## Modules
+
+```text
+src/
+  index.ts              public package exports
+  github/               GitHub App credentials, JWT, authz, discovery, ingest
+  analysis/             static analysis engine
+  rag/                  chunking, embeddings, retrieval
+  cim/                  project model / ontology
+  mcp/                  MCP project intelligence server
+  review/               pull request review
+  server/               HTTP webhook listener (POST /webhooks/github)
+  suggestions/          code-change suggestions
+  security/             vulnerability assessment
+  worker/               pgmq consumer, clone-at-SHA, findings persistence
+tests/                  vitest suites mirroring src/
+```
+
+Callers import from the package root or a module under `src/` instead of talking to GitHub, parsers, embeddings, or vulnerability feeds directly.
+
+## GitHub integration
+
+GitHub access is installation-based, not personal-access-token-based.
+
+1. **App credentials** (`GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`) load from the environment.
+2. **App JWT** (RS256, short-lived) authenticates as the GitHub App.
+3. **Installation access tokens** are minted per installation and cached until shortly before expiry.
+4. **Authorization** checks that an installation can see a repository and holds the required permission rank (`read` < `write` < `admin`).
+5. **Discovery** lists installation repositories, with filters, and records which repos are selected for analysis.
+6. **Ingest** clones a selected, authorized repository into a local worktree and records a snapshot (ref, SHA, files) for later analysis.
+7. **Branch tracking** records branch heads and commits (from the GitHub API or from webhook payloads) and the last ingested SHA per branch.
+8. **Webhooks** verify `X-Hub-Signature-256`, parse GitHub events, and update branch tracking for push/delete. `src/server/webhooks.ts` is the HTTP listener (`codehound serve` / `npm start`): `POST /webhooks/github` returns 401 on a bad signature, 202 on accepted or duplicate deliveries, and dispatches `pull_request` events to ingestion and review.
+9. **Incremental ingest** fast-forwards an existing worktree when the new commit is a descendant of the last ingest; otherwise it reclones. Push webhooks drive this path.
+10. **Language detection** classifies each ingested file (extension, filename, shebang) and records a language inventory plus a primary language.
+11. **Metadata storage** keeps repository and per-commit version records (languages, files, SHAs) behind a store interface; the in-memory implementation is for tests and early local use.
+12. **Retry** wraps clone/ingest with exponential backoff, skips non-retryable authorization errors, and records per-attempt job status.
+
+## Code analysis engine
+
+Analysis is language-agnostic at the pipeline layer. GitHub ingest produces a file list with detected languages; the analysis engine does not parse GitHub HTTP itself.
+
+1. **Adapters** implement `LanguageAdapter` for one or more languages and emit a shared document shape (`symbols`, `imports`, `calls`, `relations`, `endpoints`, `dataFlows`, `components`). The TypeScript adapter parses TypeScript and JavaScript with the compiler API (syntactic diagnostics, then a source-file AST), then walks that tree for declarations, module specifiers, calls, heritage, HTTP routes, and local data flow.
+2. **Registry** maps a detected language name to the first registered adapter. Unknown or undetected languages are skipped, not fatal. The initial targets are TypeScript and JavaScript, with framework hints for React, Express, and Nest.
+3. **Pipeline** walks an ingest file list, dispatches each file, isolates adapter failures so one file cannot abort the run, and resolves relative imports into cross-file links.
+4. **Results** are `AnalysisDocument` values plus a skip list and import links. `InMemoryAnalysisStore` keeps runs by repository and commit SHA.
+
+Callers should import from `src/analysis` (or the package root) rather than constructing language-specific parsers ad hoc.
+
+## Code RAG and retrieval
+
+Retrieval sits on analysis documents and raw file text. It does not call GitHub HTTP.
+
+1. **Chunking** splits source on extracted symbols (plus a file preamble) and markdown on headings; leftover text uses a sliding window (40 lines, 5-line overlap).
+2. **Embeddings** go through an `Embedder` interface. `HashingEmbedder` is the local default (token hashing, L2-normalized, cosine similarity). A remote embedding client can implement the same interface later.
+3. **Vector storage** is a `VectorStore`. `InMemoryVectorStore` holds embedded chunks and filters by repository, path, language, and symbol metadata.
+4. **Search** combines semantic nearest-neighbor search with BM25 keyword search (`k1=1.2`, `b=0.75`). Hybrid retrieval fuses the two ranked lists with reciprocal rank fusion (`k=60`).
+5. **Ranking** wraps any retriever: symbol-name boosts, metadata filters, and path/rerank boosts.
+6. **Incremental index** replaces chunks for a path or repository when the SHA-256 digest of chunk text changes.
+7. **Eval** scores retrievers with recall@k and mean reciprocal rank on labeled cases.
+
+## Code Intelligence Model
+
+The CIM is a typed entity/relation graph built from an `AnalysisRun`.
+
+1. **Ontology** names entity kinds (project, repository, file, module, symbol, component, endpoint, type, layer, rule) and relation kinds (contains, imports, depends-on, calls, extends, implements, aliases, exposes, flows-to, governs).
+2. **Ingest** maps analysis documents into that graph: files and symbols, import/dependency edges, calls, components and modules, endpoints, data-flow `flows-to` edges, architecture layers from path prefixes, and business rules from `validate`/`assert`/`ensure`/`check`/`guard` symbol names (`governs` the symbol and its file).
+3. **Storage** is a `CimStore`. `InMemoryCimStore` keeps versioned snapshots per repository. `persistNewVersion` bumps the model version before save.
+4. **Incremental updates** drop entities (and incident relations) by file path, then re-ingest the new analysis for that path.
+5. **Query** (`CimQueryLayer`) exposes entity filters plus dependency, call, component, layer, data-flow, and rule-binding graphs.
+
+## MCP project intelligence server
+
+The MCP server speaks JSON-RPC 2.0 over newline-delimited stdio (and Content-Length frames). It does not require a hosted MCP gateway.
+
+1. **Protocol** supports `2024-11-05`, `2025-03-26`, and `2025-06-18`. `initialize`, `ping`, `tools/list`, `tools/call`, empty `resources/list` / `prompts/list`, and `notifications/initialized` are implemented.
+2. **Tools** are named `codehound_*` and cover project discovery, code retrieval, dependency and call graphs, components and layers, business rules, impact analysis, and RAG+CIM context composition.
+3. **Host** (`IntelligenceHost`) holds in-memory CIM models, file text, and an optional `Retriever`. Tests use the local hashing embedder and hybrid retriever; a remote retriever can be injected later.
+4. **Responses** are shaped for MCP clients: JSON text plus `structuredContent` with `summary`, `data`, `citations`, and `hints`.
+
+## Pull request review
+
+PR review talks to GitHub through the existing App installation client. Tests inject a scripted `HttpClient` (`MockHttp` in `tests/helpers/http.ts`) rather than the `fetch` transport.
+
+1. **Ingest** loads a pull request, its files, and commits, and stores them in `InMemoryPullStore`. `pull_request` webhooks can trigger the same path.
+2. **Diff analysis** parses unified patches into hunks and added/deleted line numbers.
+3. **Changed-code context** retrieves indexed chunks that overlap those lines.
+4. **Impact** asks the CIM for dependents, dependencies, layers, and rules of changed paths.
+5. **Detectors** scan added and deleted lines for smells, bad practices, architecture and rule violations, regression risk, and security sinks. A classifier can raise severity when a file has many dependents.
+6. **Comments and summary** turn findings into Markdown inline comments and a review body. High or critical findings request changes; a clean review approves.
+7. **Publish** posts that review through the GitHub App installation client (`pull_requests:write`). Tests inject `MockHttp`. To script a new GitHub call, register a route with `.on({ method, urlIncludes, body })`. Routes match by method and a URL substring; unmatched routes return 404.
+
+## Code-change suggestions
+
+Suggestions are local rewrites, not a hosted model API.
+
+1. **Pipeline** maps a finding or issue onto code, generates single-file and multi-file edits, emits unified diffs, and validates the result.
+2. **Guards** refuse dropped exports that still have dependents, application imports of tests, and deletion of `validate`/`assert`/`ensure`/`check`/`guard` rules.
+3. **Tests** propose a companion test module for new `src/` exports.
+4. **Integration** attaches a `diff` fence to matching PR review comments when validation passes.
+
+## Vulnerability assessment
+
+Security analysis is a pipeline of scanners over repository files, analysis documents, and the CIM. It does not require a hosted vulnerability feed.
+
+1. **Context** (`SecurityScanContext`) holds file text, optional `AnalysisRun` and `CimQueryLayer`, and manifest files (`package.json` / lockfiles).
+2. **Scanners** implement `VulnerabilityScanner`. The `SecurityPipeline` runs them in order and returns a `SecurityScanReport`.
+3. **Advisories** go through `AdvisoryDatabase`. `LocalAdvisoryDatabase` is the default (curated npm ranges); a GitHub Advisory or OSV client can implement the same interface later.
+4. **Stages** are SAST, dependency scanning, secrets, authn/authz, taint/data-flow, injection, insecure APIs, security business rules, cross-component tracing, severity classification, and remediation.
+5. **Findings** carry CWE/CVE, package identity, and an optional trace. Review integration maps them onto PR comments for changed paths.
+
+Callers should import from `src/security` (or the package root) rather than talking to a vulnerability API directly.
+
+## Analysis worker
+
+The hosted scanning process is `codehound worker` (`src/worker`). Core owns the GitHub App and enqueues `analysis.requested` on pgmq. The worker does not serve that traffic over HTTP.
+
+1. **Queue** — `pgmq.read` on `oktant_analysis` with a visibility timeout. See the [queue contract](/reference/queue-contract/) for the exact message schema.
+2. **Clone** — `cloneWithToken` checks out `payload.commit_sha` using the short-lived installation token in the job. The App private key is not used.
+3. **Scan** — `createDefaultSecurityPipeline()` (SAST, secrets, dependencies, and the other built-in scanners). Repositories that exceed file-count or byte caps fail with `repo_too_large`.
+4. **Persist** — writes `analysis_runs`, `findings`, and `project_summaries` over a Postgres connection that bypasses RLS. Tokens are redacted in logs and `error_message`.
+5. **Ack** — `pgmq.delete` on success or permanent failure. Crashes retry until `CODEHOUND_MAX_ATTEMPTS`. The worktree is always removed.
+6. **Health** — `GET /health` and `GET /healthz` for Fly.io / Railway. The image is `node dist/cli.js worker` (Node 22 + git).
+
+## Design rules
+
+- Secrets never appear in git, logs, or thrown error messages.
+- GitHub HTTP is behind the `HttpClient` interface so tests do not need the network. Tests inject `MockHttp` (`tests/helpers/http.ts`). The live `fetch` transport (`createFetchHttpClient`) is not covered by the default suite.
+- Selection and ingest stores are interfaces; the in-memory implementations are for tests and early local use.
+- Authorization is explicit: discovery, selection, and clone all go through the same authorizer.
+
+## Local implementations and what replaces them
+
+These seams run locally so the library and tests work without external credentials. The interface stays; the implementation is swapped when a hosted backend is available. None of the hosted backends are connected yet.
+
+| Interface | Local implementation | Hosted backend later |
+| --- | --- | --- |
+| `Embedder` | `HashingEmbedder` | Remote embedding API |
+| `VectorStore` | `InMemoryVectorStore` | Hosted vector index |
+| `CimStore` | `InMemoryCimStore` | Postgres or equivalent |
+| `AnalysisStore` | `InMemoryAnalysisStore` | Durable analysis store |
+| `AdvisoryDatabase` | `LocalAdvisoryDatabase` | OSV, GitHub Advisory, or similar |
+| Change / remediation generation | Local line rewrites (`generateSuggestions`, `suggestRemediations`) | Hosted generation API |
+| Metadata / selection / pull stores | In-memory maps | Durable repository metadata |
+| Language adapters | TypeScript and JavaScript | More languages behind `LanguageAdapter` |
+
+## Status
+
+The Linear milestones from GitHub integration through vulnerability assessment (OKT-21 to OKT-120) are implemented and merged to `main`, along with follow-up fixes OKT-144 to OKT-152. The pgmq worker was added on top so Core can queue scans. In production use today, the worker runs the security pipeline only; retrieval, the CIM, and MCP are used as a library and in tests.
