@@ -25,6 +25,10 @@ export default defineConfig({
             { label: "Architecture", slug: "architecture" },
           ],
         },
+        {
+          label: "Getting started",
+          items: [{ autogenerate: { directory: "getting-started" } }],
+        },
       ],
     }),
   ],
