@@ -22,6 +22,7 @@ export default defineConfig({
           items: [
             { label: "Overview", slug: "overview" },
             { label: "What is built", slug: "status" },
+            { label: "Architecture", slug: "architecture" },
           ],
         },
       ],
